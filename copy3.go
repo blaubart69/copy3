@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // stat := f.Sys().(*syscall.Win32FileAttributeData)
@@ -15,6 +17,16 @@ type ToCopy struct {
 	path string
 	info fs.FileInfo
 }
+
+type Stats struct {
+	filesRead    uint64
+	filesWritten uint64
+	bytesRead    uint64
+	bytesWritten uint64
+	dirsCreated  uint64
+}
+
+var stats = Stats{}
 
 func printErr(api string, err error, message string) {
 	fmt.Printf("E: %s, %s, %s\n", api, err.Error(), message)
@@ -45,7 +57,10 @@ func createTargetDir(sourceRootLen int, targetDir string, sourceDirChan <-chan s
 			} else {
 				printErr("mkdir", err, dir2create)
 			}
+		} else {
+			atomic.AddUint64(&stats.dirsCreated, 1)
 		}
+
 	}
 	fmt.Printf("I: createTargetDir ended (%s)\n", targetDir)
 }
@@ -121,12 +136,15 @@ func createWriteTargetfile(sourceRootLen int, targetDir string, fileinfos <-chan
 				datablock := <-datablocks
 				if len(datablock) == 0 { // EOF
 					//fmt.Printf("copied %s\n", targetfilename)
+					atomic.AddUint64(&stats.filesWritten, 1)
 					break
 				} else {
-					_, err := fp.Write(datablock)
+					written, err := fp.Write(datablock)
 					if err != nil {
 						printErr("write file", err, targetfilename)
 						break
+					} else {
+						atomic.AddUint64(&stats.bytesWritten, uint64(written))
 					}
 				}
 			}
@@ -149,6 +167,7 @@ func sendFileToTargets(fp *os.File, dataChans []chan []byte, bufs *[2][4096]byte
 		if err != nil && !errors.Is(err, io.EOF) {
 			printErr("read file", err, "")
 		} else {
+			atomic.AddUint64(&stats.bytesRead, uint64(numberRead))
 			for _, target := range dataChans {
 				target <- buf[:numberRead] // send read bytes to all target writers
 			}
@@ -178,6 +197,7 @@ func readHashCopy(source string, targetDirs []string, files <-chan ToCopy, wg *s
 		} else {
 			sendFileToTargets(fp, targetDataChan, &bufs)
 			fp.Close()
+			atomic.AddUint64(&stats.filesRead, 1)
 		}
 	}
 
@@ -189,6 +209,15 @@ func readHashCopy(source string, targetDirs []string, files <-chan ToCopy, wg *s
 	for _, c := range targetFilenameChan {
 		close(c)
 	}
+}
+
+func printStats(stats *Stats) {
+	fmt.Printf("files read/bytes wrote/bytes %d/%d\t%d/%d\tdirs created %d\n",
+		atomic.LoadUint64(&stats.filesRead),
+		atomic.LoadUint64(&stats.bytesRead),
+		atomic.LoadUint64(&stats.filesWritten),
+		atomic.LoadUint64(&stats.bytesWritten),
+		atomic.LoadUint64(&stats.dirsCreated))
 }
 
 func main() {
@@ -210,5 +239,21 @@ func main() {
 
 	go enumerate(source, targets, files)
 
-	wg.Wait()
+	finished := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(finished)
+	}()
+
+loop:
+	for {
+		select {
+		case <-finished:
+			printStats(&stats)
+			fmt.Println("done")
+			break loop
+		case <-time.After(1 * time.Second):
+			printStats(&stats)
+		}
+	}
 }
