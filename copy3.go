@@ -60,7 +60,6 @@ func createTargetDir(sourceRootLen int, targetDir string, sourceDirChan <-chan s
 		} else {
 			atomic.AddUint64(&stats.dirsCreated, 1)
 		}
-
 	}
 }
 
