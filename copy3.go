@@ -42,7 +42,6 @@ func createTargetDir(sourceRootLen int, targetDir string, sourceDirChan <-chan s
 				} else {
 					printErr("mkdir/PathError", err, dir2create)
 				}
-				continue
 			} else {
 				printErr("mkdir", err, dir2create)
 			}
