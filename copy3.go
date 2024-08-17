@@ -16,11 +16,6 @@ type ToCopy struct {
 	info fs.FileInfo
 }
 
-type Fanout struct {
-	fileinfo   chan ToCopy
-	datablocks chan []byte
-}
-
 func printErr(api string, err error, message string) {
 	fmt.Printf("E: %s, %s, %s\n", api, err.Error(), message)
 }
