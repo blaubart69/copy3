@@ -62,7 +62,6 @@ func createTargetDir(sourceRootLen int, targetDir string, sourceDirChan <-chan s
 		}
 
 	}
-	fmt.Printf("I: createTargetDir ended (%s)\n", targetDir)
 }
 
 func enumerate(source string, targetDirs []string, files chan<- ToCopy) {
@@ -100,8 +99,6 @@ func enumerate(source string, targetDirs []string, files chan<- ToCopy) {
 	if walkErr != nil {
 		fmt.Println(walkErr)
 	}
-
-	fmt.Println("I: enumaration ended")
 }
 
 func startTargetWriters(source string, targetDirs []string, wg *sync.WaitGroup) ([]chan ToCopy, []chan []byte) {
@@ -154,8 +151,6 @@ func createWriteTargetfile(sourceRootLen int, targetDir string, fileinfos <-chan
 
 		// TODO: set timestamps and attributes
 	}
-
-	fmt.Printf("targetWriter ended (%s)\n", targetDir)
 }
 
 func sendFileToTargets(fp *os.File, dataChans []chan []byte, bufs *[2][4096]byte) {
@@ -201,8 +196,6 @@ func readHashCopy(source string, targetDirs []string, files <-chan ToCopy, wg *s
 		}
 	}
 
-	fmt.Printf("readHashCopy ended\n")
-
 	for _, c := range targetDataChan {
 		close(c)
 	}
@@ -212,7 +205,7 @@ func readHashCopy(source string, targetDirs []string, files <-chan ToCopy, wg *s
 }
 
 func printStats(stats *Stats) {
-	fmt.Printf("files read/bytes wrote/bytes %d/%d\t%d/%d\tdirs created %d\n",
+	fmt.Printf("read: %d/%d\twrite: %d/%d\tdirs created %d\n",
 		atomic.LoadUint64(&stats.filesRead),
 		atomic.LoadUint64(&stats.bytesRead),
 		atomic.LoadUint64(&stats.filesWritten),
@@ -226,7 +219,7 @@ func main() {
 	targets := []string{"\\\\?\\c:\\temp\\1", "\\\\?\\c:\\temp\\2"}
 
 	const MAX_ENUMERATE = 100
-	const COPY_WORKER = 1
+	const COPY_WORKER = 16
 
 	var wg sync.WaitGroup
 
