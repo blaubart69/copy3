@@ -111,7 +111,7 @@ func startTargetWriters(source string, targetDirs []string, wg *sync.WaitGroup) 
 		datablocks := make(chan []byte)
 
 		wg.Add(1)
-		go createWriteTargetfile(len(source), targetDir, fileinfo, datablocks, wg)
+		go createWriteTargetfiles(len(source), targetDir, fileinfo, datablocks, wg)
 		targetFilenameChans = append(targetFilenameChans, fileinfo)
 		targetDataChans = append(targetDataChans, datablocks)
 	}
@@ -119,7 +119,7 @@ func startTargetWriters(source string, targetDirs []string, wg *sync.WaitGroup) 
 	return targetFilenameChans, targetDataChans
 }
 
-func createWriteTargetfile(sourceRootLen int, targetDir string, fileinfos <-chan ToCopy, datablocks <-chan []byte, wg *sync.WaitGroup) {
+func createWriteTargetfiles(sourceRootLen int, targetDir string, fileinfos <-chan ToCopy, datablocks <-chan []byte, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	for fileinfo := range fileinfos {
