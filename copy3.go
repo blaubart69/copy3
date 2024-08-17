@@ -95,9 +95,10 @@ func enumerate(source string, targetDirs []string, files chan<- ToCopy) {
 	fmt.Println("I: enumaration ended")
 }
 
-func startTargetWriters(source string, targetDirs []string, wg *sync.WaitGroup) []Fanout {
+func startTargetWriters(source string, targetDirs []string, wg *sync.WaitGroup) ([]chan ToCopy, []chan []byte) {
 
-	var targets []Fanout
+	var targetFilenameChans []chan ToCopy
+	var targetDataChans []chan []byte
 
 	for _, targetDir := range targetDirs {
 		fileinfo := make(chan ToCopy)
@@ -105,10 +106,11 @@ func startTargetWriters(source string, targetDirs []string, wg *sync.WaitGroup) 
 
 		wg.Add(1)
 		go createWriteTargetfile(len(source), targetDir, fileinfo, datablocks, wg)
-		targets = append(targets, Fanout{fileinfo, datablocks})
+		targetFilenameChans = append(targetFilenameChans, fileinfo)
+		targetDataChans = append(targetDataChans, datablocks)
 	}
 
-	return targets
+	return targetFilenameChans, targetDataChans
 }
 
 func createWriteTargetfile(sourceRootLen int, targetDir string, fileinfos <-chan ToCopy, datablocks <-chan []byte, wg *sync.WaitGroup) {
@@ -144,7 +146,7 @@ func createWriteTargetfile(sourceRootLen int, targetDir string, fileinfos <-chan
 	fmt.Printf("targetWriter ended (%s)\n", targetDir)
 }
 
-func sendFileToTargets(fp *os.File, targetWriters []Fanout, bufs *[2][4096]byte) {
+func sendFileToTargets(fp *os.File, dataChans []chan []byte, bufs *[2][4096]byte) {
 	bufIdx := 0
 	for {
 		bufIdx = 1 - bufIdx
@@ -153,8 +155,8 @@ func sendFileToTargets(fp *os.File, targetWriters []Fanout, bufs *[2][4096]byte)
 		if err != nil && !errors.Is(err, io.EOF) {
 			printErr("read file", err, "")
 		} else {
-			for _, target := range targetWriters {
-				target.datablocks <- buf[:numberRead] // send read bytes to all target writers
+			for _, target := range dataChans {
+				target <- buf[:numberRead] // send read bytes to all target writers
 			}
 
 			if numberRead == 0 {
@@ -166,30 +168,32 @@ func sendFileToTargets(fp *os.File, targetWriters []Fanout, bufs *[2][4096]byte)
 
 func readHashCopy(source string, targetDirs []string, files <-chan ToCopy, wg *sync.WaitGroup) {
 	defer wg.Done()
-	targetWriters := startTargetWriters(source, targetDirs, wg)
+	targetFilenameChan, targetDataChan := startTargetWriters(source, targetDirs, wg)
 
 	var bufs [2][4096]byte
 
 	for file := range files {
 
-		for _, target := range targetWriters {
-			target.fileinfo <- file // send filename to all target writers
+		for _, target := range targetFilenameChan {
+			target <- file // send filename to all target writers
 		}
 
 		fp, err := os.Open(file.path)
 		if err != nil {
 			printErr("open file", err, file.path)
 		} else {
-			sendFileToTargets(fp, targetWriters, &bufs)
+			sendFileToTargets(fp, targetDataChan, &bufs)
 			fp.Close()
 		}
 	}
 
 	fmt.Printf("readHashCopy ended\n")
 
-	for _, target := range targetWriters {
-		close(target.fileinfo)
-		close(target.datablocks)
+	for _, c := range targetDataChan {
+		close(c)
+	}
+	for _, c := range targetFilenameChan {
+		close(c)
 	}
 }
 
