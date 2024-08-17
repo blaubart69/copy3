@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -145,6 +146,17 @@ func createWriteTargetfiles(sourceRootLen int, targetDir string, fileinfos <-cha
 				}
 			}
 		}
+		stat := fileinfo.info.Sys().(*syscall.Win32FileAttributeData)
+
+		setTimeErr := syscall.SetFileTime(
+			syscall.Handle(fp.Fd()),
+			&stat.CreationTime,
+			&stat.LastAccessTime,
+			&stat.LastWriteTime)
+
+		if setTimeErr != nil {
+			printErr("SetFileTime", setTimeErr, targetfilename)
+		}
 
 		fp.Close()
 
@@ -152,53 +164,57 @@ func createWriteTargetfiles(sourceRootLen int, targetDir string, fileinfos <-cha
 	}
 }
 
-func sendFileToTargets(fp *os.File, dataChans []chan []byte, bufs *[2][4096]byte) {
-	bufIdx := 0
-	for {
-		bufIdx = 1 - bufIdx
-		buf := bufs[bufIdx]
-		numberRead, err := fp.Read(buf[:])
-		if err != nil && !errors.Is(err, io.EOF) {
-			printErr("read file", err, "")
-		} else {
-			atomic.AddUint64(&stats.bytesRead, uint64(numberRead))
-			for _, target := range dataChans {
-				target <- buf[:numberRead] // send read bytes to all target writers
-			}
+// read a source file block by block.
+// send byte slice to all writers.
+// last slice has a len of zero. indicating EOF.
+func copyFileToTargets(filename string, dataChans []chan []byte, bufs *[2][4096]byte) {
+	fp, err := os.Open(filename)
+	if err != nil {
+		printErr("open file", err, filename)
+	} else {
+		defer fp.Close()
+		bufIdx := 0
+		for {
+			bufIdx = 1 - bufIdx
+			buf := bufs[bufIdx]
+			numberRead, err := fp.Read(buf[:])
+			if err != nil && !errors.Is(err, io.EOF) {
+				printErr("read file", err, "")
+			} else {
+				atomic.AddUint64(&stats.bytesRead, uint64(numberRead))
 
-			if numberRead == 0 {
-				break
+				for _, target := range dataChans {
+					target <- buf[:numberRead] // send read bytes to all target writers
+				}
+
+				if numberRead == 0 {
+					break
+				}
 			}
 		}
+		atomic.AddUint64(&stats.filesRead, 1)
 	}
 }
 
 func readHashCopy(source string, targetDirs []string, files <-chan ToCopy, wg *sync.WaitGroup) {
 	defer wg.Done()
-	targetFilenameChan, targetDataChan := startTargetWriters(source, targetDirs, wg)
+	targetFilenameChans, targetDataChans := startTargetWriters(source, targetDirs, wg)
 
 	var bufs [2][4096]byte
 
 	for file := range files {
 
-		for _, target := range targetFilenameChan {
+		for _, target := range targetFilenameChans {
 			target <- file // send filename to all target writers
 		}
 
-		fp, err := os.Open(file.path)
-		if err != nil {
-			printErr("open file", err, file.path)
-		} else {
-			sendFileToTargets(fp, targetDataChan, &bufs)
-			fp.Close()
-			atomic.AddUint64(&stats.filesRead, 1)
-		}
+		copyFileToTargets(file.path, targetDataChans, &bufs)
 	}
 
-	for _, c := range targetDataChan {
+	for _, c := range targetDataChans {
 		close(c)
 	}
-	for _, c := range targetFilenameChan {
+	for _, c := range targetFilenameChans {
 		close(c)
 	}
 }
@@ -218,13 +234,13 @@ func main() {
 	targets := []string{"\\\\?\\c:\\temp\\1", "\\\\?\\c:\\temp\\2"}
 
 	const MAX_ENUMERATE = 100
-	const COPY_WORKER = 16
+	const READ_WORKER = 16
 
 	var wg sync.WaitGroup
 
 	files := make(chan ToCopy, MAX_ENUMERATE)
 
-	for i := 0; i < COPY_WORKER; i++ {
+	for i := 0; i < READ_WORKER; i++ {
 		wg.Add(1)
 		go readHashCopy(source, targets, files, &wg)
 	}
