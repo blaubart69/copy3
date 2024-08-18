@@ -124,42 +124,47 @@ func createWriteTargetfiles(sourceRootLen int, targetDir string, fileinfos <-cha
 
 	for fileinfo := range fileinfos {
 		targetfilename := createTargetfilename(sourceRootLen, targetDir, fileinfo.path)
+		stat := fileinfo.info.Sys().(*syscall.Win32FileAttributeData)
 
-		fp, err := os.Create(targetfilename)
-		if err != nil {
-			printErr("create file", err, targetfilename)
+		if strptr, err := syscall.UTF16PtrFromString(targetfilename); err != nil {
+			printErr("UTF16PtrFromString", err, targetfilename)
+		} else if handle, err := syscall.CreateFile(
+			strptr,
+			syscall.GENERIC_WRITE,
+			syscall.FILE_SHARE_READ,
+			nil,
+			syscall.CREATE_ALWAYS,
+			stat.FileAttributes,
+			0); err != nil {
+			printErr("CreateFile", err, targetfilename)
 		} else {
+			fp := os.NewFile(uintptr(handle), targetfilename)
 			for {
 				datablock := <-datablocks
 				if len(datablock) == 0 { // EOF
 					//fmt.Printf("copied %s\n", targetfilename)
 					atomic.AddUint64(&stats.filesWritten, 1)
 					break
+				} else if written, err := fp.Write(datablock); err != nil {
+					printErr("write file", err, targetfilename)
+					break
 				} else {
-					written, err := fp.Write(datablock)
-					if err != nil {
-						printErr("write file", err, targetfilename)
-						break
-					} else {
-						atomic.AddUint64(&stats.bytesWritten, uint64(written))
-					}
+					atomic.AddUint64(&stats.bytesWritten, uint64(written))
 				}
 			}
+
+			setTimeErr := syscall.SetFileTime(
+				handle,
+				&stat.CreationTime,
+				&stat.LastAccessTime,
+				&stat.LastWriteTime)
+
+			if setTimeErr != nil {
+				printErr("SetFileTime", setTimeErr, targetfilename)
+			}
+
+			fp.Close()
 		}
-		stat := fileinfo.info.Sys().(*syscall.Win32FileAttributeData)
-
-		setTimeErr := syscall.SetFileTime(
-			syscall.Handle(fp.Fd()),
-			&stat.CreationTime,
-			&stat.LastAccessTime,
-			&stat.LastWriteTime)
-
-		if setTimeErr != nil {
-			printErr("SetFileTime", setTimeErr, targetfilename)
-		}
-
-		fp.Close()
-
 		// TODO: set timestamps and attributes
 	}
 }
