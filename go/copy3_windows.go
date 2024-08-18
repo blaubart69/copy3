@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -223,22 +225,62 @@ func readFileSendToTargets(filename string, dataChans []chan []byte, bufs *[2][4
 	}
 }
 
-func readFiles(
-	source string,
-	targetDirs []string,
-	files <-chan ToCopy,
-	wg *sync.WaitGroup) {
+type HashResult struct {
+	filename string
+	hash     []byte
+}
+
+func hasher(filenames <-chan string, filedata <-chan []byte, hashes chan<- HashResult) {
+
+	h := sha256.New()
+
+	for filename := range filenames {
+		for data := range filedata {
+			if len(data) == 0 {
+				hashes <- HashResult{filename, h.Sum(nil)}
+				h.Reset()
+				break
+			} else {
+				h.Write(data)
+			}
+		}
+	}
+}
+
+func hashWriter(filename string, hashes <-chan HashResult) {
+	fp, err := os.Create(filename)
+	if err != nil {
+		panic(fmt.Sprintf("could not create result file for hashes. err: %s", err))
+	} else {
+		defer fp.Close()
+
+		for hash := range hashes {
+			fp.WriteString(fmt.Sprintf("%s %s\n", hex.EncodeToString(hash.hash), hash.filename))
+		}
+	}
+}
+
+func readFiles(source string, targetDirs []string, files <-chan ToCopy, hashes chan<- HashResult, wg *sync.WaitGroup) {
 
 	defer wg.Done()
-
+	sourceLen := len(source)
 	targetFilenameChans, targetDataChans := startTargetWriters(source, targetDirs, wg)
-	var bufs [2][4096]byte
+	hasherFilenames := make(chan string)
+	hasherData := make(chan []byte)
 
+	// send data blocks of the files also to the hasher
+	targetDataChans = append(targetDataChans, hasherData)
+
+	go hasher(hasherFilenames, hasherData, hashes)
+
+	var bufs [2][4096]byte
 	for file := range files {
 
 		for _, target := range targetFilenameChans {
-			target <- file // send filename to all target writers
+			target <- file // send file to all target writers
 		}
+		relativeFilename := file.path[sourceLen+1:]
+		hasherFilenames <- relativeFilename
 
 		readFileSendToTargets(file.path, targetDataChans, &bufs)
 	}
@@ -249,6 +291,7 @@ func readFiles(
 	for _, c := range targetFilenameChans {
 		close(c)
 	}
+	close(hasherFilenames)
 }
 
 func main() {
@@ -264,16 +307,16 @@ func main() {
 	// channel from enumerate to read files
 	files := make(chan ToCopy, MAX_ENUMERATE)
 
-	// slices of channels for:
-	//	1, creating target files
-	//  2, content of files ([]byte)
+	// channel to the writer of hashes
+	hashes := make(chan HashResult)
+	go hashWriter("./hashes.txt", hashes)
 
 	// go routines that read the content of the incoming files
 	// 	1, send filenames and contents to a "create and write" routine
 	//  2, send filenames and contents to a hasher routine
 	for i := 0; i < READ_WORKER; i++ {
 		wg.Add(1)
-		go readFiles(source, targets, files, &wg)
+		go readFiles(source, targets, files, hashes, &wg)
 	}
 
 	go enumerate(source, targets, files)
@@ -281,7 +324,7 @@ func main() {
 	finished := make(chan struct{})
 	go func() {
 		wg.Wait()
-
+		close(hashes)
 		close(finished)
 	}()
 
