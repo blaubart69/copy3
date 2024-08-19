@@ -29,6 +29,11 @@ type Stats struct {
 	dirsCreated  uint64
 }
 
+type CreateDir struct {
+	path string
+	wg   *sync.WaitGroup
+}
+
 func printStats(stats *Stats) {
 	fmt.Printf("read: %d/%d\twrite: %d/%d\tdirs created %d\n",
 		atomic.LoadUint64(&stats.filesRead),
@@ -48,17 +53,23 @@ func createTargetfilename(sourceRootLen int, targetDir string, fullsourcename st
 	return filepath.Join(targetDir, fullsourcename[sourceRootLen+1:])
 }
 
-func createTargetDir(sourceRootLen int, targetDir string, sourceDirChan <-chan string) {
+func createTargetDir(sourceRootLen int, targetDir string, sourceDirChan <-chan CreateDir) {
 	for sourceDir := range sourceDirChan {
+
 		var dir2create string
 
-		if len(sourceDir) == sourceRootLen {
+		if len(sourceDir.path) == sourceRootLen {
 			dir2create = targetDir
 		} else {
-			dir2create = createTargetfilename(sourceRootLen, targetDir, sourceDir)
+			dir2create = createTargetfilename(sourceRootLen, targetDir, sourceDir.path)
 		}
 
 		err := os.Mkdir(dir2create, os.ModeDir)
+
+		// signal that the directory has been processed.
+		// even if there was an error. to keep the enumerate loop processing.
+		sourceDir.wg.Done()
+
 		if err != nil {
 			if e, ok := err.(*os.PathError); ok {
 				if errors.Is(e, fs.ErrExist) {
@@ -79,22 +90,28 @@ func enumerate(source string, targetDirs []string, files chan<- ToCopy) {
 
 	defer close(files)
 
-	var sourceDirChans []chan string
+	var sourceDirChans []chan CreateDir
 
 	for _, targetDir := range targetDirs {
-		sourceDirChan := make(chan string)
+		sourceDirChan := make(chan CreateDir)
 		go createTargetDir(len(source), targetDir, sourceDirChan)
 		sourceDirChans = append(sourceDirChans, sourceDirChan)
 	}
+
+	var waitForTargetDirs sync.WaitGroup
 
 	walkErr := filepath.Walk(source, func(path string, info fs.FileInfo, err error) error {
 		if err != nil {
 			fmt.Println(err)
 		}
 
+		// wait for outstanding "CreateDirectory" for targets
+		waitForTargetDirs.Wait()
+
 		if info.IsDir() {
 			for _, c := range sourceDirChans {
-				c <- path
+				waitForTargetDirs.Add(1)
+				c <- CreateDir{path, &waitForTargetDirs}
 			}
 		} else {
 			files <- ToCopy{path, info}
@@ -157,7 +174,7 @@ func createWriteTargetfiles(sourceRootLen int, targetDir string, fileinfos <-cha
 
 		fp, err := createFileForWriting(targetfilename, stat.FileAttributes)
 		if err != nil {
-			fmt.Printf("E: create target file. %s (skip file) %s", err, targetfilename)
+			printErr("create target file. (SKIP)", err, targetfilename)
 		}
 
 		for {
